@@ -1,0 +1,59 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.3'
+          channel: stable
+      - name: Montar projeto
+        run: |
+          flutter create --org br.cesupa --project-name circuito --platforms android build_app
+          cp main.dart build_app/lib/main.dart
+          cp pubspec.yaml build_app/pubspec.yaml
+          rm -rf build_app/test
+          cp google-services.json build_app/android/app/
+          cd build_app/android
+          python3 - <<'PY'
+          import re, pathlib
+          kts = pathlib.Path('settings.gradle.kts').exists()
+          st = pathlib.Path('settings.gradle.kts' if kts else 'settings.gradle')
+          ap = pathlib.Path('app/build.gradle.kts' if kts else 'app/build.gradle')
+          mf = pathlib.Path('app/src/main/AndroidManifest.xml')
+          gs = '"com.google.gms.google-services"'
+          gs = f'id({gs})' if kts else f'id {gs}'
+          s = st.read_text()
+          s = re.sub(r'(kotlin\.android"\)?\s+version\s+")[^"]+', r'\g<1>2.1.0', s)
+          s = re.sub(r'(\n(\s*)id\s*\(?\s*"com\.android\.application"[^\n]*)', lambda m: m.group(1) + '\n' + m.group(2) + gs + ' version "4.4.2" apply false', s, count=1)
+          st.write_text(s)
+          a = ap.read_text()
+          a = re.sub(r'(\n(\s*)id\s*\(?\s*"dev\.flutter\.flutter-gradle-plugin")', lambda m: '\n' + m.group(2) + gs + m.group(1), a, count=1)
+          a = a.replace('flutter.minSdkVersion', '23')
+          ap.write_text(a)
+          m = mf.read_text()
+          m = re.sub(r'(<manifest[^>]*>)', r'\1\n<uses-permission android:name="android.permission.INTERNET"/>', m, count=1)
+          m = re.sub(r'android:label="[^"]*"', 'android:label="Circuito de Descobertas"', m, count=1)
+          mf.write_text(m)
+          print(s); print(a)
+          PY
+      - name: Build APK
+        working-directory: build_app
+        run: |
+          flutter pub get
+          flutter build apk --release
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          files: build_app/build/app/outputs/flutter-apk/app-release.apk
