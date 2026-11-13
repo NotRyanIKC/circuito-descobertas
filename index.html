@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel · Circuito de Descobertas</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #222; }
+  header { background: #1f3a68; color: #fff; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  .card { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  input, textarea { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 15px; }
+  button { padding: 9px 14px; border: 0; border-radius: 6px; background: #1f3a68; color: #fff; font-size: 14px; cursor: pointer; }
+  button.sec { background: #e3e7ee; color: #222; }
+  button.warn { background: #b23b3b; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .estande { border-top: 1px solid #eee; padding: 12px 0; }
+  .estande:first-child { border-top: 0; }
+  .tag { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+  .on { background: #d7f5dd; color: #186a2b; }
+  .off { background: #f5d7d7; color: #8a1f1f; }
+  .total { font-size: 22px; font-weight: bold; color: #1f3a68; }
+  .muted { color: #666; font-size: 13px; }
+  #erro { color: #b23b3b; }
+  #qrModal { position: fixed; inset: 0; background: #fff; display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; }
+  #qrModal img { width: min(80vw, 380px); height: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Circuito de Descobertas · Organização</h1>
+  <button id="sair" class="sec" style="display:none">Sair</button>
+</header>
+
+<main>
+  <div id="telaLogin" class="card" style="max-width:380px;margin:40px auto">
+    <h2>Login do administrador</h2>
+    <input id="email" type="email" placeholder="E-mail" value="admin@circuito.app">
+    <input id="senha" type="password" placeholder="Senha">
+    <button id="entrar">Entrar</button>
+    <p id="erro"></p>
+  </div>
+
+  <div id="telaPainel" style="display:none">
+    <div class="card">
+      <h2 id="tituloForm">Cadastrar estande</h2>
+      <input id="fId" placeholder="Código do estande (ex: E1)">
+      <input id="fNome" placeholder="Nome">
+      <textarea id="fDesc" rows="2" placeholder="Descrição breve"></textarea>
+      <input id="fLocal" placeholder="Localização (ex: Corredor B, estande 12)">
+      <label class="row" style="margin-bottom:10px"><input id="fAtivo" type="checkbox" checked style="width:auto;margin:0"> Ativo</label>
+      <div class="row">
+        <button id="salvar">Salvar</button>
+        <button id="cancelar" class="sec" style="display:none">Cancelar edição</button>
+      </div>
+      <p id="msgForm" class="muted"></p>
+    </div>
+
+    <div class="card">
+      <h2>Estandes e check-ins <span class="muted">(total geral: <b id="totalGeral">0</b>)</span></h2>
+      <div id="lista" class="muted">Carregando...</div>
+    </div>
+  </div>
+</main>
+
+<div id="qrModal">
+  <h2 id="qrNome"></h2>
+  <img id="qrImg" alt="QR code do estande">
+  <p class="muted">Código: <b id="qrCod"></b></p>
+  <button id="fecharQr" class="sec">Fechar</button>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, collection, doc, getDoc, setDoc, updateDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { firebaseConfig } from "./config.js";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const $ = (id) => document.getElementById(id);
+const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let estandes = [];
+let contagem = {};
+let editando = null;
+let pararEstandes = null, pararCheckins = null;
+
+$("entrar").onclick = async () => {
+  $("erro").textContent = "";
+  try {
+    await signInWithEmailAndPassword(auth, $("email").value.trim(), $("senha").value);
+  } catch (e) {
+    $("erro").textContent = "Não foi possível entrar: " + e.code;
+  }
+};
+$("sair").onclick = () => signOut(auth);
+
+onAuthStateChanged(auth, (user) => {
+  const logado = !!user && !user.isAnonymous;
+  $("telaLogin").style.display = logado ? "none" : "block";
+  $("telaPainel").style.display = logado ? "block" : "none";
+  $("sair").style.display = logado ? "inline-block" : "none";
+  if (pararEstandes) { pararEstandes(); pararCheckins(); pararEstandes = null; }
+  if (!logado) return;
+
+  pararEstandes = onSnapshot(collection(db, "estandes"), (snap) => {
+    estandes = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.id.localeCompare(b.id));
+    render();
+  }, (e) => { $("lista").textContent = "Erro ao ler estandes: " + e.code; });
+
+  // Totais calculados a partir dos registros de check-in, em tempo real
+  pararCheckins = onSnapshot(collection(db, "checkins"), (snap) => {
+    contagem = {};
+    snap.docs.forEach((d) => {
+      const id = d.data().estandeId;
+      contagem[id] = (contagem[id] || 0) + 1;
+    });
+    $("totalGeral").textContent = snap.size;
+    render();
+  }, (e) => { $("lista").textContent = "Erro ao ler check-ins: " + e.code; });
+});
+
+function render() {
+  if (!estandes.length) { $("lista").textContent = "Nenhum estande cadastrado ainda."; return; }
+  $("lista").innerHTML = estandes.map((e) => `
+    <div class="estande">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <b>${esc(e.nome)}</b> <span class="muted">(${esc(e.id)})</span>
+          <span class="tag ${e.ativo ? "on" : "off"}">${e.ativo ? "ativo" : "inativo"}</span>
+          <div class="muted">${esc(e.descricao)}</div>
+          <div class="muted">Local: ${esc(e.localizacao)}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="total">${contagem[e.id] || 0}</div>
+          <div class="muted">check-ins</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button data-qr="${esc(e.id)}">QR code</button>
+        <button class="sec" data-edit="${esc(e.id)}">Editar</button>
+        <button class="${e.ativo ? "warn" : "sec"}" data-toggle="${esc(e.id)}">${e.ativo ? "Desativar" : "Ativar"}</button>
+      </div>
+    </div>`).join("");
+}
+
+$("lista").onclick = async (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  const e = estandes.find((x) => x.id === (b.dataset.qr || b.dataset.edit || b.dataset.toggle));
+  if (!e) return;
+  if (b.dataset.qr) abrirQr(e);
+  if (b.dataset.edit) editar(e);
+  if (b.dataset.toggle) await updateDoc(doc(db, "estandes", e.id), { ativo: !e.ativo });
+};
+
+function abrirQr(e) {
+  $("qrNome").textContent = e.nome;
+  $("qrCod").textContent = e.id;
+  $("qrImg").src = "https://api.qrserver.com/v1/create-qr-code/?size=600x600&margin=20&data=" + encodeURIComponent(e.id);
+  $("qrModal").style.display = "flex";
+}
+$("fecharQr").onclick = () => { $("qrModal").style.display = "none"; };
+
+function editar(e) {
+  editando = e.id;
+  $("tituloForm").textContent = "Editar estande " + e.id;
+  $("fId").value = e.id; $("fId").disabled = true;
+  $("fNome").value = e.nome || "";
+  $("fDesc").value = e.descricao || "";
+  $("fLocal").value = e.localizacao || "";
+  $("fAtivo").checked = !!e.ativo;
+  $("cancelar").style.display = "inline-block";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function limpar() {
+  editando = null;
+  $("tituloForm").textContent = "Cadastrar estande";
+  $("fId").disabled = false;
+  ["fId", "fNome", "fDesc", "fLocal"].forEach((id) => { $(id).value = ""; });
+  $("fAtivo").checked = true;
+  $("cancelar").style.display = "none";
+}
+$("cancelar").onclick = limpar;
+
+$("salvar").onclick = async () => {
+  const id = $("fId").value.trim().toUpperCase();
+  const dados = {
+    nome: $("fNome").value.trim(),
+    descricao: $("fDesc").value.trim(),
+    localizacao: $("fLocal").value.trim(),
+    ativo: $("fAtivo").checked,
+  };
+  if (!id || id.includes("/") || !dados.nome) { $("msgForm").textContent = "Preencha código (sem barra) e nome."; return; }
+  try {
+    if (!editando && (await getDoc(doc(db, "estandes", id))).exists()) {
+      $("msgForm").textContent = "Já existe um estande com o código " + id + ".";
+      return;
+    }
+    await setDoc(doc(db, "estandes", editando || id), dados);
+    $("msgForm").textContent = "Estande " + (editando || id) + " salvo.";
+    limpar();
+  } catch (e) {
+    $("msgForm").textContent = "Erro ao salvar: " + e.code;
+  }
+};
+</script>
+</body>
+</html>
